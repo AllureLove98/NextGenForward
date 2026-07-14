@@ -66,6 +66,14 @@ const CONFIG = {
     TOPIC_DELETE_DELAY_MS: 500,        // 批量删除话题时的延迟（毫秒），避免Telegram API速率限制
     TOPIC_DELETE_RETRY_ATTEMPTS: 2,    // 话题删除重试次数
     TOPIC_DELETE_RETRY_DELAY_MS: 1000, // 话题删除重试延迟（毫秒）
+
+    // 消息确认反馈配置（message_ack）
+    MESSAGE_ACK_ENABLED_DEFAULT: false,       // 默认关闭
+    MESSAGE_ACK_MODE_DEFAULT: "reply",        // 默认模式：reply（回复消息），可选 reaction（添加表情）
+    MESSAGE_ACK_REPLY_RECEIVED_DEFAULT: "已收到",  // reply 模式：收到消息文本
+    MESSAGE_ACK_REPLY_READ_DEFAULT: "已读",        // reply 模式：已读文本
+    MESSAGE_ACK_REACTION_RECEIVED_DEFAULT: "👍",   // reaction 模式：收到表情
+    MESSAGE_ACK_REACTION_READ_DEFAULT: "✅",       // reaction 模式：已读表情
 };
 
 const VERIFY_MODE_DEFAULT = "local_quiz"; // 默认：本地题库验证（Turnstile 可选）
@@ -179,6 +187,132 @@ async function setGlobalVerifyMode(env, mode) {
 
     await kvPut(env, GLOBAL_VERIFY_MODE_KEY, m);
     return true;
+}
+
+// --- 消息确认反馈配置（message_ack）---
+// KV key：总开关
+const GLOBAL_MESSAGE_ACK_ENABLED_KEY = "global_message_ack:enabled";
+// KV key：模式（"reply" 或 "reaction"）
+const GLOBAL_MESSAGE_ACK_MODE_KEY = "global_message_ack:mode";
+// KV key：reply 模式 - 收到消息文本
+const GLOBAL_MESSAGE_ACK_REPLY_RECEIVED_KEY = "global_message_ack:reply_received";
+// KV key：reply 模式 - 已读文本
+const GLOBAL_MESSAGE_ACK_REPLY_READ_KEY = "global_message_ack:reply_read";
+// KV key：reaction 模式 - 收到表情
+const GLOBAL_MESSAGE_ACK_REACTION_RECEIVED_KEY = "global_message_ack:reaction_received";
+// KV key：reaction 模式 - 已读表情
+const GLOBAL_MESSAGE_ACK_REACTION_READ_KEY = "global_message_ack:reaction_read";
+
+// --- 总开关 ---
+async function getMessageAckEnabled(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_ENABLED_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    return v === "1";
+}
+async function setMessageAckEnabled(env, enabled) {
+    if (enabled) { await kvPut(env, GLOBAL_MESSAGE_ACK_ENABLED_KEY, "1"); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_ENABLED_KEY); }
+}
+
+// --- 模式 ---
+async function getMessageAckMode(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_MODE_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    const mode = (v || "").toString().trim();
+    return (mode === "reaction") ? "reaction" : "reply";
+}
+async function setMessageAckMode(env, mode) {
+    const m = (mode || "").toString().trim();
+    if (m === "reaction") { await kvPut(env, GLOBAL_MESSAGE_ACK_MODE_KEY, "reaction"); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_MODE_KEY); }
+}
+
+// --- reply 模式：收到文本 ---
+async function getMessageAckReplyReceived(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_REPLY_RECEIVED_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    return (v || CONFIG.MESSAGE_ACK_REPLY_RECEIVED_DEFAULT).toString().trim() || CONFIG.MESSAGE_ACK_REPLY_RECEIVED_DEFAULT;
+}
+async function setMessageAckReplyReceived(env, text) {
+    const t = (text || "").toString().trim();
+    if (t) { await kvPut(env, GLOBAL_MESSAGE_ACK_REPLY_RECEIVED_KEY, t); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_REPLY_RECEIVED_KEY); }
+}
+
+// --- reply 模式：已读文本 ---
+async function getMessageAckReplyRead(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_REPLY_READ_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    return (v || CONFIG.MESSAGE_ACK_REPLY_READ_DEFAULT).toString().trim() || CONFIG.MESSAGE_ACK_REPLY_READ_DEFAULT;
+}
+async function setMessageAckReplyRead(env, text) {
+    const t = (text || "").toString().trim();
+    if (t) { await kvPut(env, GLOBAL_MESSAGE_ACK_REPLY_READ_KEY, t); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_REPLY_READ_KEY); }
+}
+
+// --- reaction 模式：收到表情 ---
+async function getMessageAckReactionReceived(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_REACTION_RECEIVED_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    return (v || CONFIG.MESSAGE_ACK_REACTION_RECEIVED_DEFAULT).toString().trim() || CONFIG.MESSAGE_ACK_REACTION_RECEIVED_DEFAULT;
+}
+async function setMessageAckReactionReceived(env, emoji) {
+    const e = (emoji || "").toString().trim();
+    if (e) { await kvPut(env, GLOBAL_MESSAGE_ACK_REACTION_RECEIVED_KEY, e); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_REACTION_RECEIVED_KEY); }
+}
+
+// --- reaction 模式：已读表情 ---
+async function getMessageAckReactionRead(env) {
+    const v = await kvGetText(env, GLOBAL_MESSAGE_ACK_REACTION_READ_KEY, CONFIG.KV_CRITICAL_CACHE_TTL);
+    return (v || CONFIG.MESSAGE_ACK_REACTION_READ_DEFAULT).toString().trim() || CONFIG.MESSAGE_ACK_REACTION_READ_DEFAULT;
+}
+async function setMessageAckReactionRead(env, emoji) {
+    const e = (emoji || "").toString().trim();
+    if (e) { await kvPut(env, GLOBAL_MESSAGE_ACK_REACTION_READ_KEY, e); }
+    else { await kvDelete(env, GLOBAL_MESSAGE_ACK_REACTION_READ_KEY); }
+}
+
+// 消息确认反馈关联信息存储（用于已读更新）
+// 格式：message_ack:{userId} = { groupMsgId, userReplyMsgId?, userOriginalMsgId?, mode, createdAt }
+// - reply 模式：存储 userReplyMsgId（bot 发送的回复消息 ID）
+// - reaction 模式：存储 userOriginalMsgId（用户原始消息 ID，用于添加反应）
+async function saveMessageAckAssoc(env, userId, groupMsgId, opts = {}) {
+    const key = `message_ack:${userId}`;
+    const data = {
+        groupMsgId: Number(groupMsgId),
+        mode: (opts.mode === "reaction") ? "reaction" : "reply",
+        createdAt: Date.now()
+    };
+    if (opts.userReplyMsgId) data.userReplyMsgId = Number(opts.userReplyMsgId);
+    if (opts.userOriginalMsgId) data.userOriginalMsgId = Number(opts.userOriginalMsgId);
+    // 关联信息存留24小时
+    await kvPut(env, key, JSON.stringify(data), { expirationTtl: 86400 });
+
+    // 反向映射：群组消息ID → 用户ID（用于通过消息反应查找用户）
+    const reverseKey = `group_msg_user:${groupMsgId}`;
+    await kvPut(env, reverseKey, String(userId), { expirationTtl: 86400 });
+}
+
+async function getMessageAckAssoc(env, userId) {
+    const key = `message_ack:${userId}`;
+    try {
+        const data = await kvGetJSON(env, key, null, {});
+        return data && typeof data === 'object' ? data : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function deleteMessageAckAssoc(env, userId) {
+    const key = `message_ack:${userId}`;
+    try { await kvDelete(env, key); } catch (_) { }
+}
+
+async function getUserByGroupMessageId(env, groupMsgId) {
+    const reverseKey = `group_msg_user:${groupMsgId}`;
+    try {
+        const userId = await kvGetText(env, reverseKey);
+        return userId ? Number(userId) : null;
+    } catch (_) {
+        return null;
+    }
 }
 
 
@@ -3114,6 +3248,17 @@ async function buildSettingsPanel(env, adminId, botEnabled, opts = {}) {
     const aiText = hasWorkersAIBinding(env) ? "✅ 可用" : "⛔ 未绑定";
     const tsReady = hasTurnstileBinding(env);
     const tsText = tsReady ? "✅ 已配置" : "⛔ 未配置";
+
+    // 消息确认反馈配置（message_ack）
+    const ackEnabled = await getMessageAckEnabled(env);
+    const ackMode = await getMessageAckMode(env);
+    const ackReplyReceived = await getMessageAckReplyReceived(env);
+    const ackReplyRead = await getMessageAckReplyRead(env);
+    const ackReactionReceived = await getMessageAckReactionReceived(env);
+    const ackReactionRead = await getMessageAckReactionRead(env);
+    const ackStatus = ackEnabled ? "✅ 已开启" : "⛔ 已关闭";
+    const ackModeText = (ackMode === "reaction") ? "😀 表情反应" : "💬 回复消息";
+
     let panelText = `⚙️ **设置面板**
 
 机器人总开关：${statusText}
@@ -3121,6 +3266,8 @@ async function buildSettingsPanel(env, adminId, botEnabled, opts = {}) {
 Workers AI：${aiText}
 Turnstile：${tsText}
 验证方式：${verifyModeText}
+消息确认反馈：${ackStatus}
+反馈模式：${ackModeText}
 
 通过下方按钮进行操作。`;
     if (note) {
@@ -3133,7 +3280,7 @@ ${note}`;
     const toggleBtnText = botEnabled ? "⛔ 关闭机器人" : "✅ 开启机器人";
 
     const page = (!hideReset && opts && typeof opts.page !== "undefined") ? Number(opts.page) : 1;
-    const currentPage = (page === 2 && !hideReset) ? 2 : 1;
+    const currentPage = (page === 2 && !hideReset) ? 2 : (page === 3 && !hideReset) ? 3 : 1;
 
     const rows = [];
 
@@ -3151,17 +3298,44 @@ ${note}`;
 
         rows.push([{ text: "✏️ 编辑垃圾消息规则", callback_data: await makeData("sf_rules") }]);
 
+        rows.push([{ text: "💬 消息确认反馈设置", callback_data: await makeData("p3") }]);
+
         if (!hideReset) {
             rows.push([{ text: "➡️ 下一页", callback_data: await makeData("p2") }]);
         }
 
         rows.push([{ text: "✖️ 关闭面板", callback_data: await makeData("close") }]);
-    } else {
+    } else if (currentPage === 2) {
         // Page 2
         rows.push([{ text: toggleBtnText, callback_data: await makeData(toggleAction) }]);
         rows.push([{ text: "⚠️ 重置黑名单", callback_data: await makeData("reset_blacklist") }]);
         rows.push([{ text: "⚠️ 清空并重置所有聊天数据", callback_data: await makeData("reset") }]);
         rows.push([{ text: "⬅️ 上一页", callback_data: await makeData("p1") }]);
+        rows.push([{ text: "✖️ 关闭面板", callback_data: await makeData("close") }]);
+    } else {
+        // Page 3: 消息确认反馈设置（message_ack）
+        const ackToggleAction = ackEnabled ? "ack_off" : "ack_on";
+        const ackToggleText = ackEnabled ? "🛑 关闭消息确认反馈" : "✅ 开启消息确认反馈";
+        rows.push([{ text: ackToggleText, callback_data: await makeData(ackToggleAction) }]);
+
+        if (ackEnabled) {
+            // 模式切换：reply / reaction
+            const modeToggleAction = (ackMode === "reaction") ? "ackm_reply" : "ackm_reaction";
+            const modeToggleText = (ackMode === "reaction") ? "💬 切换为回复消息模式" : "😀 切换为表情反应模式";
+            rows.push([{ text: modeToggleText, callback_data: await makeData(modeToggleAction) }]);
+
+            if (ackMode === "reply") {
+                // reply 模式：编辑收到文本 & 已读文本
+                rows.push([{ text: "✏️ 编辑收到消息文本", callback_data: await makeData("ackrr_text") }]);
+                rows.push([{ text: "✏️ 编辑已读文本", callback_data: await makeData("ackrr_read") }]);
+            } else {
+                // reaction 模式：编辑收到表情 & 已读表情
+                rows.push([{ text: "✏️ 编辑收到表情", callback_data: await makeData("ackrc_emoji") }]);
+                rows.push([{ text: "✏️ 编辑已读表情", callback_data: await makeData("ackrc_read") }]);
+            }
+        }
+
+        rows.push([{ text: "⬅️ 返回", callback_data: await makeData("p1") }]);
         rows.push([{ text: "✖️ 关闭面板", callback_data: await makeData("close") }]);
     }
 
@@ -3944,6 +4118,348 @@ Turnstile：${tsText}
         }
 
         Logger.info('spam_filter_rules_edit_canceled', { adminId });
+        return;
+    }
+
+    if (action === "p3") {
+        const botEnabled = await isBotEnabled(env);
+        const page = 3;
+        const panel = await buildSettingsPanel(env, adminId, botEnabled, { page });
+
+        try {
+            await tgCall(env, "editMessageText", {
+                chat_id: chatId,
+                message_id: messageId,
+                text: panel.text,
+                parse_mode: "Markdown",
+                reply_markup: panel.reply_markup
+            });
+        } catch (_) { }
+
+        return;
+    }
+
+    // --- 消息确认反馈（message_ack）总开关 ---
+    if (action === "ack_on" || action === "ack_off") {
+        const enabled = (action === "ack_on");
+        await setMessageAckEnabled(env, enabled);
+
+        const botEnabled = await isBotEnabled(env);
+        const text = enabled ? "✅ 已开启" : "⛔ 已关闭";
+        const panel = await buildSettingsPanel(env, adminId, botEnabled, { page: 3, note: `✅ 已设置消息确认反馈为：${text}` });
+
+        try {
+            await tgCall(env, "editMessageText", {
+                chat_id: chatId,
+                message_id: messageId,
+                text: panel.text,
+                parse_mode: "Markdown"
+            });
+            await tgCall(env, "editMessageReplyMarkup", {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: panel.reply_markup
+            });
+        } catch (_) { }
+
+        Logger.info('message_ack_toggle_via_settings', { adminId, enabled });
+        return;
+    }
+
+    // --- 模式切换：reply / reaction ---
+    if (action === "ackm_reply" || action === "ackm_reaction") {
+        const mode = (action === "ackm_reaction") ? "reaction" : "reply";
+        await setMessageAckMode(env, mode);
+
+        const botEnabled = await isBotEnabled(env);
+        const modeText = (mode === "reaction") ? "😀 表情反应" : "💬 回复消息";
+        const panel = await buildSettingsPanel(env, adminId, botEnabled, { page: 3, note: `✅ 已切换反馈模式为：${modeText}` });
+
+        try {
+            await tgCall(env, "editMessageText", {
+                chat_id: chatId,
+                message_id: messageId,
+                text: panel.text,
+                parse_mode: "Markdown"
+            });
+            await tgCall(env, "editMessageReplyMarkup", {
+                chat_id: chatId,
+                message_id: messageId,
+                reply_markup: panel.reply_markup
+            });
+        } catch (_) { }
+
+        Logger.info('message_ack_mode_toggle_via_settings', { adminId, mode });
+        return;
+    }
+
+    // --- reply 模式：编辑收到消息文本 ---
+    if (action === "ackrr_text") {
+        const currentText = await getMessageAckReplyReceived(env);
+        const editExp = Math.floor(Date.now() / 1000) + 1800;
+        let editSig = "0";
+        if (signSecret) {
+            try { editSig = await signSettingsActionToken(signSecret, adminId, "ackrr_text_cancel", editExp); } catch (_) { editSig = "0"; }
+        }
+        let cancelCb = `st|ackrr_text_cancel|${adminId}|${editExp}|${editSig}`;
+        if (cancelCb.length > 64) cancelCb = `st|ackrr_text_cancel|${adminId}|${editExp}|0`;
+
+        const editText = `✏️ **编辑收到消息文本（reply 模式）**
+
+当前文本：
+\`\`\`
+${currentText}
+\`\`\`
+
+请【回复】本条消息，发送新的收到消息文本。`;
+
+        let prompt;
+        try {
+            prompt = await tgCall(env, "sendMessage", {
+                chat_id: chatId,
+                ...(settingsThreadId ? { message_thread_id: settingsThreadId } : {}),
+                text: editText,
+                parse_mode: "Markdown",
+                reply_markup: { inline_keyboard: [[{ text: "✖️ 取消编辑", callback_data: cancelCb }]] }
+            });
+        } catch (e) {
+            Logger.warn('ack_reply_received_text_edit_send_failed', e, { adminId });
+            return;
+        }
+
+        const sessKey = `ackrr_text_edit:${adminId}`;
+        const sessVal = {
+            admin_id: adminId,
+            chat_id: chatId,
+            thread_id: settingsThreadId || 1,
+            prompt_message_id: (prompt && prompt.result && prompt.result.message_id) ? prompt.result.message_id : prompt.message_id,
+            started_at: Date.now()
+        };
+        await safePutJSON(env, sessKey, sessVal, { expirationTtl: 1800 });
+
+        try { await tgCall(env, "deleteMessage", { chat_id: chatId, message_id: messageId }); } catch (_) {
+            try { await tgCall(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); } catch (_) { }
+        }
+
+        Logger.info('ack_reply_received_text_edit_prompt_sent', { adminId });
+        return;
+    }
+
+    if (action === "ackrr_text_cancel") {
+        const sessKey = `ackrr_text_edit:${adminId}`;
+        let sess = null;
+        try { sess = await kvGetJSON(env, sessKey, null, {}); } catch (_) { sess = null; }
+        try { await kvDelete(env, sessKey); } catch (_) { }
+
+        const targetChatId = (sess && sess.chat_id) ? Number(sess.chat_id) : chatId;
+        const targetMsgId = (sess && sess.prompt_message_id) ? Number(sess.prompt_message_id) : messageId;
+
+        try { await tgCall(env, "deleteMessage", { chat_id: targetChatId, message_id: targetMsgId }); } catch (_) {
+            try { await tgCall(env, "editMessageText", { chat_id: targetChatId, message_id: targetMsgId, text: "✖️ 已取消编辑收到消息文本。" }); } catch (_) { }
+        }
+
+        Logger.info('ack_reply_received_text_edit_canceled', { adminId });
+        return;
+    }
+
+    // --- reply 模式：编辑已读文本 ---
+    if (action === "ackrr_read") {
+        const currentText = await getMessageAckReplyRead(env);
+        const editExp = Math.floor(Date.now() / 1000) + 1800;
+        let editSig = "0";
+        if (signSecret) {
+            try { editSig = await signSettingsActionToken(signSecret, adminId, "ackrr_read_cancel", editExp); } catch (_) { editSig = "0"; }
+        }
+        let cancelCb = `st|ackrr_read_cancel|${adminId}|${editExp}|${editSig}`;
+        if (cancelCb.length > 64) cancelCb = `st|ackrr_read_cancel|${adminId}|${editExp}|0`;
+
+        const editText = `✏️ **编辑已读文本（reply 模式）**
+
+当前文本：
+\`\`\`
+${currentText}
+\`\`\`
+
+请【回复】本条消息，发送新的已读文本。`;
+
+        let prompt;
+        try {
+            prompt = await tgCall(env, "sendMessage", {
+                chat_id: chatId,
+                ...(settingsThreadId ? { message_thread_id: settingsThreadId } : {}),
+                text: editText,
+                parse_mode: "Markdown",
+                reply_markup: { inline_keyboard: [[{ text: "✖️ 取消编辑", callback_data: cancelCb }]] }
+            });
+        } catch (e) {
+            Logger.warn('ack_reply_read_text_edit_send_failed', e, { adminId });
+            return;
+        }
+
+        const sessKey = `ackrr_read_edit:${adminId}`;
+        const sessVal = {
+            admin_id: adminId,
+            chat_id: chatId,
+            thread_id: settingsThreadId || 1,
+            prompt_message_id: (prompt && prompt.result && prompt.result.message_id) ? prompt.result.message_id : prompt.message_id,
+            started_at: Date.now()
+        };
+        await safePutJSON(env, sessKey, sessVal, { expirationTtl: 1800 });
+
+        try { await tgCall(env, "deleteMessage", { chat_id: chatId, message_id: messageId }); } catch (_) {
+            try { await tgCall(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); } catch (_) { }
+        }
+
+        Logger.info('ack_reply_read_text_edit_prompt_sent', { adminId });
+        return;
+    }
+
+    if (action === "ackrr_read_cancel") {
+        const sessKey = `ackrr_read_edit:${adminId}`;
+        let sess = null;
+        try { sess = await kvGetJSON(env, sessKey, null, {}); } catch (_) { sess = null; }
+        try { await kvDelete(env, sessKey); } catch (_) { }
+
+        const targetChatId = (sess && sess.chat_id) ? Number(sess.chat_id) : chatId;
+        const targetMsgId = (sess && sess.prompt_message_id) ? Number(sess.prompt_message_id) : messageId;
+
+        try { await tgCall(env, "deleteMessage", { chat_id: targetChatId, message_id: targetMsgId }); } catch (_) {
+            try { await tgCall(env, "editMessageText", { chat_id: targetChatId, message_id: targetMsgId, text: "✖️ 已取消编辑已读文本。" }); } catch (_) { }
+        }
+
+        Logger.info('ack_reply_read_text_edit_canceled', { adminId });
+        return;
+    }
+
+    // --- reaction 模式：编辑收到表情 ---
+    if (action === "ackrc_emoji") {
+        const currentEmoji = await getMessageAckReactionReceived(env);
+        const editExp = Math.floor(Date.now() / 1000) + 1800;
+        let editSig = "0";
+        if (signSecret) {
+            try { editSig = await signSettingsActionToken(signSecret, adminId, "ackrc_emoji_cancel", editExp); } catch (_) { editSig = "0"; }
+        }
+        let cancelCb = `st|ackrc_emoji_cancel|${adminId}|${editExp}|${editSig}`;
+        if (cancelCb.length > 64) cancelCb = `st|ackrc_emoji_cancel|${adminId}|${editExp}|0`;
+
+        const editText = `✏️ **编辑收到表情（reaction 模式）**
+
+当前表情：${currentEmoji}
+
+请【回复】本条消息，发送一个新的 emoji 表情。`;
+
+        let prompt;
+        try {
+            prompt = await tgCall(env, "sendMessage", {
+                chat_id: chatId,
+                ...(settingsThreadId ? { message_thread_id: settingsThreadId } : {}),
+                text: editText,
+                parse_mode: "Markdown",
+                reply_markup: { inline_keyboard: [[{ text: "✖️ 取消编辑", callback_data: cancelCb }]] }
+            });
+        } catch (e) {
+            Logger.warn('ack_reaction_received_emoji_edit_send_failed', e, { adminId });
+            return;
+        }
+
+        const sessKey = `ackrc_emoji_edit:${adminId}`;
+        const sessVal = {
+            admin_id: adminId,
+            chat_id: chatId,
+            thread_id: settingsThreadId || 1,
+            prompt_message_id: (prompt && prompt.result && prompt.result.message_id) ? prompt.result.message_id : prompt.message_id,
+            started_at: Date.now()
+        };
+        await safePutJSON(env, sessKey, sessVal, { expirationTtl: 1800 });
+
+        try { await tgCall(env, "deleteMessage", { chat_id: chatId, message_id: messageId }); } catch (_) {
+            try { await tgCall(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); } catch (_) { }
+        }
+
+        Logger.info('ack_reaction_received_emoji_edit_prompt_sent', { adminId });
+        return;
+    }
+
+    if (action === "ackrc_emoji_cancel") {
+        const sessKey = `ackrc_emoji_edit:${adminId}`;
+        let sess = null;
+        try { sess = await kvGetJSON(env, sessKey, null, {}); } catch (_) { sess = null; }
+        try { await kvDelete(env, sessKey); } catch (_) { }
+
+        const targetChatId = (sess && sess.chat_id) ? Number(sess.chat_id) : chatId;
+        const targetMsgId = (sess && sess.prompt_message_id) ? Number(sess.prompt_message_id) : messageId;
+
+        try { await tgCall(env, "deleteMessage", { chat_id: targetChatId, message_id: targetMsgId }); } catch (_) {
+            try { await tgCall(env, "editMessageText", { chat_id: targetChatId, message_id: targetMsgId, text: "✖️ 已取消编辑收到表情。" }); } catch (_) { }
+        }
+
+        Logger.info('ack_reaction_received_emoji_edit_canceled', { adminId });
+        return;
+    }
+
+    // --- reaction 模式：编辑已读表情 ---
+    if (action === "ackrc_read") {
+        const currentEmoji = await getMessageAckReactionRead(env);
+        const editExp = Math.floor(Date.now() / 1000) + 1800;
+        let editSig = "0";
+        if (signSecret) {
+            try { editSig = await signSettingsActionToken(signSecret, adminId, "ackrc_read_cancel", editExp); } catch (_) { editSig = "0"; }
+        }
+        let cancelCb = `st|ackrc_read_cancel|${adminId}|${editExp}|${editSig}`;
+        if (cancelCb.length > 64) cancelCb = `st|ackrc_read_cancel|${adminId}|${editExp}|0`;
+
+        const editText = `✏️ **编辑已读表情（reaction 模式）**
+
+当前表情：${currentEmoji}
+
+请【回复】本条消息，发送一个新的 emoji 表情。`;
+
+        let prompt;
+        try {
+            prompt = await tgCall(env, "sendMessage", {
+                chat_id: chatId,
+                ...(settingsThreadId ? { message_thread_id: settingsThreadId } : {}),
+                text: editText,
+                parse_mode: "Markdown",
+                reply_markup: { inline_keyboard: [[{ text: "✖️ 取消编辑", callback_data: cancelCb }]] }
+            });
+        } catch (e) {
+            Logger.warn('ack_reaction_read_emoji_edit_send_failed', e, { adminId });
+            return;
+        }
+
+        const sessKey = `ackrc_read_edit:${adminId}`;
+        const sessVal = {
+            admin_id: adminId,
+            chat_id: chatId,
+            thread_id: settingsThreadId || 1,
+            prompt_message_id: (prompt && prompt.result && prompt.result.message_id) ? prompt.result.message_id : prompt.message_id,
+            started_at: Date.now()
+        };
+        await safePutJSON(env, sessKey, sessVal, { expirationTtl: 1800 });
+
+        try { await tgCall(env, "deleteMessage", { chat_id: chatId, message_id: messageId }); } catch (_) {
+            try { await tgCall(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }); } catch (_) { }
+        }
+
+        Logger.info('ack_reaction_read_emoji_edit_prompt_sent', { adminId });
+        return;
+    }
+
+    if (action === "ackrc_read_cancel") {
+        const sessKey = `ackrc_read_edit:${adminId}`;
+        let sess = null;
+        try { sess = await kvGetJSON(env, sessKey, null, {}); } catch (_) { sess = null; }
+        try { await kvDelete(env, sessKey); } catch (_) { }
+
+        const targetChatId = (sess && sess.chat_id) ? Number(sess.chat_id) : chatId;
+        const targetMsgId = (sess && sess.prompt_message_id) ? Number(sess.prompt_message_id) : messageId;
+
+        try { await tgCall(env, "deleteMessage", { chat_id: targetChatId, message_id: targetMsgId }); } catch (_) {
+            try { await tgCall(env, "editMessageText", { chat_id: targetChatId, message_id: targetMsgId, text: "✖️ 已取消编辑已读表情。" }); } catch (_) { }
+        }
+
+        Logger.info('ack_reaction_read_emoji_edit_canceled', { adminId });
         return;
     }
 
@@ -5549,7 +6065,7 @@ export default {
         });
 
         // 只处理我们关心的类型
-        if (!update.message && !update.edited_message && !update.callback_query) {
+        if (!update.message && !update.edited_message && !update.callback_query && !update.message_reaction) {
             Logger.debug('unhandled_update_type_ignored', {
                 updateId,
                 types: updateTypes
@@ -5570,6 +6086,16 @@ export default {
                 } else {
                     Logger.error('handle_callback_query_failed', e);
                 }
+            }
+            return new Response("OK");
+        }
+
+        // --- 处理消息反应（已读标记） ---
+        if (update.message_reaction) {
+            try {
+                await handleMessageReaction(update.message_reaction, normalizedEnv, ctx);
+            } catch (e) {
+                Logger.warn('handle_message_reaction_failed', e);
             }
             return new Response("OK");
         }
@@ -5647,6 +6173,134 @@ export default {
 };
 
 // ---------------- 核心业务逻辑 ----------------
+
+async function handleMessageReaction(reaction, env, ctx) {
+    // message_reaction 格式：
+    // {
+    //   user_id: number,
+    //   chat_id: number,
+    //   message_id: number,
+    //   actor_count?: number,
+    //   reaction_type: "emoji" | "custom_emoji",
+    //   reaction: string (emoji or custom_emoji_id)
+    // }
+
+    try {
+        const chatId = reaction?.chat_id;
+        const messageId = reaction?.message_id;
+        const userId = reaction?.user_id;
+        const reaction_type = reaction?.reaction_type;
+        const reactionEmoji = reaction?.reaction;
+
+        if (!chatId || !messageId || !userId || !reactionEmoji) {
+            return;
+        }
+
+        // 仅处理来自群组的消息反应
+        if (!Number.isFinite(chatId) || chatId > 0) {
+            return;
+        }
+
+        // 仅处理emoji反应
+        if (reaction_type !== 'emoji') {
+            return;
+        }
+
+        // 检查是否启用了消息确认反馈
+        const ackEnabled = await getMessageAckEnabled(env);
+        if (!ackEnabled) {
+            return;
+        }
+
+        // 查找该群组消息对应的用户
+        const targetUserId = await getUserByGroupMessageId(env, messageId);
+        if (!targetUserId) {
+            return;
+        }
+
+        // 获取消息确认关联
+        const assoc = await getMessageAckAssoc(env, targetUserId);
+        if (!assoc) {
+            return;
+        }
+
+        const ackMode = assoc.mode || "reply";
+
+        if (ackMode === "reaction") {
+            // reaction 模式：修改用户原始消息上的表情反应
+            if (!assoc.userOriginalMsgId) {
+                return;
+            }
+            const readEmoji = await getMessageAckReactionRead(env);
+            if (!readEmoji) {
+                return;
+            }
+
+            try {
+                // 先移除旧的"收到"反应，再添加新的"已读"反应
+                const receivedEmoji = await getMessageAckReactionReceived(env);
+                // 使用 setMessageReaction 替换反应（传空数组移除所有反应，再设置新反应）
+                // Telegram API: setMessageReaction 的 reaction 参数是数组
+                await tgCall(env, "setMessageReaction", {
+                    chat_id: targetUserId,
+                    message_id: assoc.userOriginalMsgId,
+                    reaction: [{ type: "emoji", emoji: readEmoji }],
+                    is_big: false
+                });
+
+                Logger.info('message_ack_reaction_updated_on_read', {
+                    targetUserId,
+                    groupMsgId: messageId,
+                    userOriginalMsgId: assoc.userOriginalMsgId,
+                    readEmoji
+                });
+
+                // 更新后删除关联，避免重复更新
+                await deleteMessageAckAssoc(env, targetUserId);
+            } catch (e) {
+                Logger.warn('message_ack_reaction_update_failed', e, {
+                    targetUserId,
+                    userOriginalMsgId: assoc.userOriginalMsgId
+                });
+            }
+        } else {
+            // reply 模式：编辑回复消息文本
+            if (!assoc.userReplyMsgId) {
+                return;
+            }
+
+            const readText = await getMessageAckReplyRead(env);
+            if (!readText) {
+                return;
+            }
+
+            try {
+                await tgCall(env, "editMessageText", {
+                    chat_id: targetUserId,
+                    message_id: assoc.userReplyMsgId,
+                    text: readText
+                });
+
+                Logger.info('message_ack_reply_updated_on_read', {
+                    targetUserId,
+                    groupMsgId: messageId,
+                    userReplyMsgId: assoc.userReplyMsgId,
+                    reactionEmoji
+                });
+
+                // 更新后删除关联，避免重复更新
+                await deleteMessageAckAssoc(env, targetUserId);
+            } catch (e) {
+                Logger.warn('message_ack_reply_update_failed', e, {
+                    targetUserId,
+                    userReplyMsgId: assoc.userReplyMsgId
+                });
+            }
+        }
+    } catch (e) {
+        Logger.error('handle_message_reaction_error', e);
+    }
+}
 
 async function handlePrivateMessage(msg, env, ctx, origin = null) {
     const userId = msg.chat.id;
@@ -6200,6 +6854,50 @@ async function forwardToTopic(msg, userId, key, env, ctx, origin = null) {
             message_thread_id: rec.thread_id
         });
     }
+
+    // 消息成功转发到群组后，消息确认反馈（message_ack）
+    if (res.ok) {
+        try {
+            const ackEnabled = await getMessageAckEnabled(env);
+            if (ackEnabled) {
+                const ackMode = await getMessageAckMode(env);
+                const groupMsgId = res.result?.message_id;
+
+                if (ackMode === "reaction") {
+                    // reaction 模式：在用户原始消息上添加表情反应
+                    const emoji = await getMessageAckReactionReceived(env);
+                    if (emoji && groupMsgId) {
+                        // 保存关联（记录用户原始消息ID，用于后续已读时修改反应）
+                        await saveMessageAckAssoc(env, userId, groupMsgId, {
+                            mode: "reaction",
+                            userOriginalMsgId: msg.message_id
+                        });
+                    }
+                } else {
+                    // reply 模式：发送回复消息
+                    const replyText = await getMessageAckReplyReceived(env);
+                    if (replyText) {
+                        const replyRes = await tgCall(env, "sendMessage", {
+                            chat_id: userId,
+                            text: replyText
+                        });
+
+                        if (replyRes.ok && replyRes.result) {
+                            const userReplyMsgId = replyRes.result.message_id;
+                            if (groupMsgId && userReplyMsgId) {
+                                await saveMessageAckAssoc(env, userId, groupMsgId, {
+                                    mode: "reply",
+                                    userReplyMsgId
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            Logger.warn('message_ack_send_failed', e, { userId });
+        }
+    }
 }
 
 
@@ -6605,6 +7303,92 @@ async function handleAdminReply(msg, env, ctx) {
         }
     } catch (e) {
         Logger.warn('spam_rules_edit_session_failed', e, { adminId: senderId });
+    }
+
+    // --- 消息确认反馈（message_ack）编辑会话处理 ---
+    try {
+        const ackSessKeys = [
+            { key: `ackrr_text_edit:${senderId}`, type: "ackrr_text" },
+            { key: `ackrr_read_edit:${senderId}`, type: "ackrr_read" },
+            { key: `ackrc_emoji_edit:${senderId}`, type: "ackrc_emoji" },
+            { key: `ackrc_read_edit:${senderId}`, type: "ackrc_read" },
+        ];
+
+        for (const { key: sessKey, type } of ackSessKeys) {
+            const sess = await kvGetJSON(env, sessKey, null, {});
+            if (!sess || !sess.prompt_message_id) continue;
+
+            const chatId = msg.chat?.id || env.SUPERGROUP_ID;
+            const curThread = (threadId === undefined || threadId === null) ? null : Number(threadId);
+            const sessThread = (sess.thread_id === undefined || sess.thread_id === null) ? null : Number(sess.thread_id);
+            const sameChat = (sess.chat_id === undefined || sess.chat_id === null) ? true : (Number(sess.chat_id) === Number(chatId));
+            const isReplyMatch = !!(msg.reply_to_message && msg.reply_to_message.message_id &&
+                Number(sess.prompt_message_id) === Number(msg.reply_to_message.message_id));
+            const sameThread = (sessThread === null) ? true : (curThread !== null && Number(curThread) === Number(sessThread));
+
+            if (!sameChat || !isReplyMatch) continue;
+
+            if (!msg.text) {
+                await tgCall(env, "sendMessage", withMessageThreadId({
+                    chat_id: chatId,
+                    message_thread_id: threadId,
+                    text: "❌ 请发送文本内容。"
+                }, (curThread && Number(curThread) !== 1) ? curThread : null));
+                return;
+            }
+
+            const newValue = (msg.text || "").replace(/\u200b/g, "").trim();
+            if (!newValue) {
+                await tgCall(env, "sendMessage", withMessageThreadId({
+                    chat_id: chatId,
+                    message_thread_id: threadId,
+                    text: "❌ 内容不能为空。"
+                }, (curThread && Number(curThread) !== 1) ? curThread : null));
+                return;
+            }
+
+            // 根据类型保存
+            if (type === "ackrr_text") {
+                await setMessageAckReplyReceived(env, newValue);
+            } else if (type === "ackrr_read") {
+                await setMessageAckReplyRead(env, newValue);
+            } else if (type === "ackrc_emoji") {
+                await setMessageAckReactionReceived(env, newValue);
+            } else if (type === "ackrc_read") {
+                await setMessageAckReactionRead(env, newValue);
+            }
+
+            // 清理会话
+            await kvDelete(env, sessKey);
+
+            const typeLabel = { ackrr_text: "收到消息文本", ackrr_read: "已读文本", ackrc_emoji: "收到表情", ackrc_read: "已读表情" }[type] || type;
+
+            const feedbackChatId = (sess.chat_id ? Number(sess.chat_id) : (msg.chat?.id || env.SUPERGROUP_ID));
+            const feedbackThreadId = ((curThread && Number(curThread) !== 1) ? curThread : ((sessThread && Number(sessThread) !== 1) ? sessThread : null));
+
+            await tgCall(env, "sendMessage", withMessageThreadId({
+                chat_id: feedbackChatId,
+                message_thread_id: feedbackThreadId,
+                text: `✅ 已更新${typeLabel}为：\n\`\`\`\n${newValue}\n\`\`\``,
+                parse_mode: "Markdown",
+                reply_to_message_id: msg.message_id
+            }, feedbackThreadId));
+
+            // 删除提示消息
+            try {
+                if (sess.chat_id && sess.prompt_message_id) {
+                    await tgCall(env, "deleteMessage", {
+                        chat_id: Number(sess.chat_id),
+                        message_id: Number(sess.prompt_message_id)
+                    });
+                }
+            } catch (_) { }
+
+            Logger.info('message_ack_edit_saved', { adminId: senderId, type, newValue });
+            return;
+        }
+    } catch (e) {
+        Logger.warn('message_ack_edit_session_failed', e, { adminId: senderId });
     }
 
     const command = extractCommand(text);
