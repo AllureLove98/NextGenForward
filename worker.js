@@ -315,6 +315,58 @@ async function getUserByGroupMessageId(env, groupMsgId) {
     }
 }
 
+// 消息确认反馈：标记为已读（管理员回复用户时触发，或群组消息被添加表情反应时触发）
+async function markMessageAckAsRead(env, userId) {
+    try {
+        const ackEnabled = await getMessageAckEnabled(env);
+        if (!ackEnabled) return;
+
+        const assoc = await getMessageAckAssoc(env, userId);
+        if (!assoc) return;
+
+        const ackMode = assoc.mode || "reply";
+
+        if (ackMode === "reaction") {
+            if (!assoc.userOriginalMsgId) return;
+            const readEmoji = await getMessageAckReactionRead(env);
+            if (!readEmoji) return;
+
+            await tgCall(env, "setMessageReaction", {
+                chat_id: userId,
+                message_id: assoc.userOriginalMsgId,
+                reaction: [{ type: "emoji", emoji: readEmoji }],
+                is_big: false
+            });
+
+            Logger.info('message_ack_reaction_updated_on_read', {
+                userId,
+                userOriginalMsgId: assoc.userOriginalMsgId,
+                readEmoji
+            });
+        } else {
+            if (!assoc.userReplyMsgId) return;
+            const readText = await getMessageAckReplyRead(env);
+            if (!readText) return;
+
+            await tgCall(env, "editMessageText", {
+                chat_id: userId,
+                message_id: assoc.userReplyMsgId,
+                text: readText
+            });
+
+            Logger.info('message_ack_reply_updated_on_read', {
+                userId,
+                userReplyMsgId: assoc.userReplyMsgId
+            });
+        }
+
+        // 更新后删除关联，避免重复更新
+        await deleteMessageAckAssoc(env, userId);
+    } catch (e) {
+        Logger.warn('mark_message_ack_as_read_failed', e, { userId });
+    }
+}
+
 
 
 // 默认垃圾规则（可在 /settings 中编辑）
@@ -6149,6 +6201,19 @@ export default {
             const text = (msg.text || "").trim();
             const command = extractCommand(text);
 
+            // 消息确认反馈：管理员在话题内发消息 → 标记该话题对应用户的消息为已读
+            if (msg.message_thread_id && msg.message_thread_id !== 1) {
+                const senderId = msg.from?.id;
+                if (senderId && (await isAdminUser(normalizedEnv, senderId))) {
+                    const threadId = msg.message_thread_id;
+                    const mappedUser = await kvGetText(normalizedEnv, `thread:${threadId}`);
+                    const topicUserId = mappedUser ? Number(mappedUser) : await resolveUserIdByThreadId(normalizedEnv, threadId);
+                    if (topicUserId) {
+                        ctx.waitUntil(markMessageAckAsRead(normalizedEnv, topicUserId));
+                    }
+                }
+            }
+
             // 处理管理员消息：
             // - 命令消息
             // - forum topic 内消息（message_thread_id 存在）
@@ -6189,111 +6254,22 @@ async function handleMessageReaction(reaction, env, ctx) {
     try {
         const chatId = reaction?.chat?.id;
         const messageId = reaction?.message_id;
-        // user 可能为 undefined（频道匿名反应），此时用 actor_chat
-        const userId = reaction?.user?.id ?? reaction?.actor_chat?.id;
         const newReactions = reaction?.new_reaction;
 
-        if (!chatId || !messageId || !userId) {
-            return;
-        }
+        if (!chatId || !messageId) return;
 
         // 仅处理来自群组的消息反应
-        if (!Number.isFinite(chatId) || chatId > 0) {
-            return;
-        }
+        if (!Number.isFinite(chatId) || chatId > 0) return;
 
         // 仅处理有新表情反应的情况（有人添加了反应）
-        if (!Array.isArray(newReactions) || newReactions.length === 0) {
-            return;
-        }
-
-        // 检查是否启用了消息确认反馈
-        const ackEnabled = await getMessageAckEnabled(env);
-        if (!ackEnabled) {
-            return;
-        }
+        if (!Array.isArray(newReactions) || newReactions.length === 0) return;
 
         // 查找该群组消息对应的用户
         const targetUserId = await getUserByGroupMessageId(env, messageId);
-        if (!targetUserId) {
-            return;
-        }
+        if (!targetUserId) return;
 
-        // 获取消息确认关联
-        const assoc = await getMessageAckAssoc(env, targetUserId);
-        if (!assoc) {
-            return;
-        }
-
-        const ackMode = assoc.mode || "reply";
-
-        if (ackMode === "reaction") {
-            // reaction 模式：修改用户原始消息上的表情反应
-            if (!assoc.userOriginalMsgId) {
-                return;
-            }
-            const readEmoji = await getMessageAckReactionRead(env);
-            if (!readEmoji) {
-                return;
-            }
-
-            try {
-                // 使用 setMessageReaction 替换反应
-                await tgCall(env, "setMessageReaction", {
-                    chat_id: targetUserId,
-                    message_id: assoc.userOriginalMsgId,
-                    reaction: [{ type: "emoji", emoji: readEmoji }],
-                    is_big: false
-                });
-
-                Logger.info('message_ack_reaction_updated_on_read', {
-                    targetUserId,
-                    groupMsgId: messageId,
-                    userOriginalMsgId: assoc.userOriginalMsgId,
-                    readEmoji
-                });
-
-                // 更新后删除关联，避免重复更新
-                await deleteMessageAckAssoc(env, targetUserId);
-            } catch (e) {
-                Logger.warn('message_ack_reaction_update_failed', e, {
-                    targetUserId,
-                    userOriginalMsgId: assoc.userOriginalMsgId
-                });
-            }
-        } else {
-            // reply 模式：编辑回复消息文本
-            if (!assoc.userReplyMsgId) {
-                return;
-            }
-
-            const readText = await getMessageAckReplyRead(env);
-            if (!readText) {
-                return;
-            }
-
-            try {
-                await tgCall(env, "editMessageText", {
-                    chat_id: targetUserId,
-                    message_id: assoc.userReplyMsgId,
-                    text: readText
-                });
-
-                Logger.info('message_ack_reply_updated_on_read', {
-                    targetUserId,
-                    groupMsgId: messageId,
-                    userReplyMsgId: assoc.userReplyMsgId
-                });
-
-                // 更新后删除关联，避免重复更新
-                await deleteMessageAckAssoc(env, targetUserId);
-            } catch (e) {
-                Logger.warn('message_ack_reply_update_failed', e, {
-                    targetUserId,
-                    userReplyMsgId: assoc.userReplyMsgId
-                });
-            }
-        }
+        // 标记为已读（辅助函数统一处理 reply/reaction 两种模式）
+        await markMessageAckAsRead(env, targetUserId);
     } catch (e) {
         Logger.error('handle_message_reaction_error', e);
     }
