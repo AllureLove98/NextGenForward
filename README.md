@@ -1,4 +1,4 @@
-# Next Gen Forward v1.6.3
+# Next Gen Forward v1.6.4
 
 <img width="535" height="185" alt="项目主图 小" src="https://github.com/user-attachments/assets/a632a655-0b6e-4f31-b6ea-1364028bf540" />
 
@@ -16,6 +16,18 @@
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/mole404/NextGenForward?tab=MIT-1-ov-file)
 [![Telegram](https://img.shields.io/badge/Telegram-DM-blue?style=social&logo=telegram)](https://t.me/Arona_Chat_Bot)
+
+<details>
+
+<summary>💡 <b>v1.6.4 版本更新（2026-07-14）</b></summary>  
+   
+### 更新内容
+   
+- **修复消息确认反馈（message_ack）两个 Bug**：
+  - **修复表情反应模式未添加表情**：消息转发成功后，reaction 模式现在会正确调用 `setMessageReaction` API 在用户消息上添加表情反应。
+  - **修复回复消息模式无法更新为已读**：修正了 `handleMessageReaction` 中 Telegram `message_reaction` 更新的字段解析（`chat.id` / `user.id` / `new_reaction`），群组内消息被已读后现在能正确编辑回复消息文本。
+
+</details>
 
 <details>
 

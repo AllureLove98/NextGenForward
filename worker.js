@@ -6175,24 +6175,25 @@ export default {
 // ---------------- 核心业务逻辑 ----------------
 
 async function handleMessageReaction(reaction, env, ctx) {
-    // message_reaction 格式：
+    // Telegram message_reaction 更新实际格式：
     // {
-    //   user_id: number,
-    //   chat_id: number,
+    //   chat: { id: number, ... },
     //   message_id: number,
-    //   actor_count?: number,
-    //   reaction_type: "emoji" | "custom_emoji",
-    //   reaction: string (emoji or custom_emoji_id)
+    //   user: { id: number, ... },        // 可能为 undefined（匿名反应）
+    //   actor_chat: { id: number, ... },  // 匿名反应时的参与者
+    //   date: number,
+    //   old_reaction: [{ type: "emoji", emoji: "👍" }, ...],
+    //   new_reaction: [{ type: "emoji", emoji: "✅" }, ...]
     // }
 
     try {
-        const chatId = reaction?.chat_id;
+        const chatId = reaction?.chat?.id;
         const messageId = reaction?.message_id;
-        const userId = reaction?.user_id;
-        const reaction_type = reaction?.reaction_type;
-        const reactionEmoji = reaction?.reaction;
+        // user 可能为 undefined（频道匿名反应），此时用 actor_chat
+        const userId = reaction?.user?.id ?? reaction?.actor_chat?.id;
+        const newReactions = reaction?.new_reaction;
 
-        if (!chatId || !messageId || !userId || !reactionEmoji) {
+        if (!chatId || !messageId || !userId) {
             return;
         }
 
@@ -6201,8 +6202,8 @@ async function handleMessageReaction(reaction, env, ctx) {
             return;
         }
 
-        // 仅处理emoji反应
-        if (reaction_type !== 'emoji') {
+        // 仅处理有新表情反应的情况（有人添加了反应）
+        if (!Array.isArray(newReactions) || newReactions.length === 0) {
             return;
         }
 
@@ -6237,10 +6238,7 @@ async function handleMessageReaction(reaction, env, ctx) {
             }
 
             try {
-                // 先移除旧的"收到"反应，再添加新的"已读"反应
-                const receivedEmoji = await getMessageAckReactionReceived(env);
-                // 使用 setMessageReaction 替换反应（传空数组移除所有反应，再设置新反应）
-                // Telegram API: setMessageReaction 的 reaction 参数是数组
+                // 使用 setMessageReaction 替换反应
                 await tgCall(env, "setMessageReaction", {
                     chat_id: targetUserId,
                     message_id: assoc.userOriginalMsgId,
@@ -6284,8 +6282,7 @@ async function handleMessageReaction(reaction, env, ctx) {
                 Logger.info('message_ack_reply_updated_on_read', {
                     targetUserId,
                     groupMsgId: messageId,
-                    userReplyMsgId: assoc.userReplyMsgId,
-                    reactionEmoji
+                    userReplyMsgId: assoc.userReplyMsgId
                 });
 
                 // 更新后删除关联，避免重复更新
@@ -6867,6 +6864,14 @@ async function forwardToTopic(msg, userId, key, env, ctx, origin = null) {
                     // reaction 模式：在用户原始消息上添加表情反应
                     const emoji = await getMessageAckReactionReceived(env);
                     if (emoji && groupMsgId) {
+                        // 在用户消息上添加表情反应
+                        await tgCall(env, "setMessageReaction", {
+                            chat_id: userId,
+                            message_id: msg.message_id,
+                            reaction: [{ type: "emoji", emoji: emoji }],
+                            is_big: false
+                        });
+
                         // 保存关联（记录用户原始消息ID，用于后续已读时修改反应）
                         await saveMessageAckAssoc(env, userId, groupMsgId, {
                             mode: "reaction",
