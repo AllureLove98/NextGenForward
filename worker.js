@@ -6264,6 +6264,10 @@ async function handleMessageReaction(reaction, env, ctx) {
         // 仅处理有新表情反应的情况（有人添加了反应）
         if (!Array.isArray(newReactions) || newReactions.length === 0) return;
 
+        // 仅 ADMIN_IDS 管理员添加表情才触发已读
+        const reactorId = reaction?.user?.id || reaction?.actor_chat?.id;
+        if (!reactorId || !(await isAdminUser(env, reactorId))) return;
+
         // 查找该群组消息对应的用户
         const targetUserId = await getUserByGroupMessageId(env, messageId);
         if (!targetUserId) return;
