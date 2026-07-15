@@ -277,6 +277,10 @@ function groupMessageUserKey(env, groupMsgId) {
     return `group_msg_user:${env.SUPERGROUP_ID}:${groupMsgId}`;
 }
 
+function groupMessageAckKey(env, groupMsgId) {
+    return `message_ack_group:${env.SUPERGROUP_ID}:${groupMsgId}`;
+}
+
 async function saveMessageAckAssoc(env, userId, groupMsgId, opts = {}) {
     const key = `message_ack:${userId}`;
     const data = {
@@ -292,6 +296,11 @@ async function saveMessageAckAssoc(env, userId, groupMsgId, opts = {}) {
     // 反向映射：群组消息ID → 用户ID（用于通过消息反应查找用户）
     const reverseKey = groupMessageUserKey(env, groupMsgId);
     await kvPut(env, reverseKey, String(userId), { expirationTtl: 86400 });
+
+    await kvPut(env, groupMessageAckKey(env, groupMsgId), JSON.stringify({
+        ...data,
+        userId: Number(userId)
+    }), { expirationTtl: 86400 });
 }
 
 async function getMessageAckAssoc(env, userId) {
@@ -299,6 +308,25 @@ async function getMessageAckAssoc(env, userId) {
     try {
         const data = await kvGetJSON(env, key, null, {});
         return data && typeof data === 'object' ? data : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function getMessageAckAssocByGroupMessageId(env, groupMsgId) {
+    try {
+        const assoc = await kvGetJSON(env, groupMessageAckKey(env, groupMsgId), null, {});
+        if (assoc && typeof assoc === "object" && Number.isFinite(Number(assoc.userId))) {
+            return assoc;
+        }
+
+        // Compatibility with acknowledgements stored by previous versions.
+        const userId = await getUserByGroupMessageId(env, groupMsgId);
+        if (!userId) return null;
+        const latest = await getMessageAckAssoc(env, userId);
+        return latest && Number(latest.groupMsgId) === Number(groupMsgId)
+            ? { ...latest, userId }
+            : null;
     } catch (_) {
         return null;
     }
@@ -324,12 +352,12 @@ async function getUserByGroupMessageId(env, groupMsgId) {
 }
 
 // 消息确认反馈：标记为已读（管理员回复用户时触发，或群组消息被添加表情反应时触发）
-async function markMessageAckAsRead(env, userId) {
+async function markMessageAckAsRead(env, userId, assocOverride = null) {
     try {
         const ackEnabled = await getMessageAckEnabled(env);
         if (!ackEnabled) return;
 
-        const assoc = await getMessageAckAssoc(env, userId);
+        const assoc = assocOverride || await getMessageAckAssoc(env, userId);
         if (!assoc) return;
 
         const ackMode = assoc.mode || "reply";
@@ -374,11 +402,22 @@ async function markMessageAckAsRead(env, userId) {
             });
         }
 
-        // 更新后删除关联，避免重复更新
-        await deleteMessageAckAssoc(env, userId);
+        // Clear only the association that was marked read.  A later message
+        // from the same user may still be waiting for acknowledgement.
+        if (assoc.groupMsgId) {
+            await deleteMessageAckAssocByGroupMessageId(env, assoc.groupMsgId);
+        }
+        const latestAssoc = await getMessageAckAssoc(env, userId);
+        if (latestAssoc && Number(latestAssoc.groupMsgId) === Number(assoc.groupMsgId)) {
+            await deleteMessageAckAssoc(env, userId);
+        }
     } catch (e) {
         Logger.warn('mark_message_ack_as_read_failed', e, { userId });
     }
+}
+
+async function deleteMessageAckAssocByGroupMessageId(env, groupMsgId) {
+    try { await kvDelete(env, groupMessageAckKey(env, groupMsgId)); } catch (_) { }
 }
 
 // An anonymous group administrator is represented by Telegram as the group
@@ -6236,7 +6275,15 @@ export default {
                     const mappedUser = await kvGetText(normalizedEnv, `thread:${threadId}`);
                     const topicUserId = mappedUser ? Number(mappedUser) : await resolveUserIdByThreadId(normalizedEnv, threadId);
                     if (topicUserId) {
-                        ctx.waitUntil(markMessageAckAsRead(normalizedEnv, topicUserId));
+                        const repliedGroupMsgId = msg.reply_to_message?.message_id;
+                        const repliedAssoc = repliedGroupMsgId
+                            ? await getMessageAckAssocByGroupMessageId(normalizedEnv, repliedGroupMsgId)
+                            : null;
+                        await markMessageAckAsRead(
+                            normalizedEnv,
+                            topicUserId,
+                            repliedAssoc?.userId === topicUserId ? repliedAssoc : null
+                        );
                     }
                 }
             }
@@ -6285,8 +6332,8 @@ async function handleMessageReaction(reaction, env, ctx) {
 
         if (!chatId || !messageId) return;
 
-        // 仅处理来自群组的消息反应
-        if (!Number.isFinite(chatId) || chatId > 0) return;
+        // 只接受配置的管理超级群更新，避免其他群组的相同 message_id 误触发已读。
+        if (String(chatId) !== String(env.SUPERGROUP_ID)) return;
 
         // 仅处理有新表情反应的情况（有人添加了反应）
         if (!Array.isArray(newReactions) || newReactions.length === 0) return;
@@ -6296,12 +6343,12 @@ async function handleMessageReaction(reaction, env, ctx) {
         const reactorId = reaction?.user?.id;
         if (!(await isAuthorizedReadMarker(env, reactorId, reaction?.actor_chat))) return;
 
-        // 查找该群组消息对应的用户
-        const targetUserId = await getUserByGroupMessageId(env, messageId);
-        if (!targetUserId) return;
+        // Use the association for this exact forwarded message.  A user can
+        // send several messages before an administrator reacts to one of them.
+        const assoc = await getMessageAckAssocByGroupMessageId(env, messageId);
+        if (!assoc?.userId) return;
 
-        // 标记为已读（辅助函数统一处理 reply/reaction 两种模式）
-        await markMessageAckAsRead(env, targetUserId);
+        await markMessageAckAsRead(env, Number(assoc.userId), assoc);
     } catch (e) {
         Logger.error('handle_message_reaction_error', e);
     }
