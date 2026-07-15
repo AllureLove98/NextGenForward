@@ -273,6 +273,10 @@ async function setMessageAckReactionRead(env, emoji) {
 // 格式：message_ack:{userId} = { groupMsgId, userReplyMsgId?, userOriginalMsgId?, mode, createdAt }
 // - reply 模式：存储 userReplyMsgId（bot 发送的回复消息 ID）
 // - reaction 模式：存储 userOriginalMsgId（用户原始消息 ID，用于添加反应）
+function groupMessageUserKey(env, groupMsgId) {
+    return `group_msg_user:${env.SUPERGROUP_ID}:${groupMsgId}`;
+}
+
 async function saveMessageAckAssoc(env, userId, groupMsgId, opts = {}) {
     const key = `message_ack:${userId}`;
     const data = {
@@ -286,7 +290,7 @@ async function saveMessageAckAssoc(env, userId, groupMsgId, opts = {}) {
     await kvPut(env, key, JSON.stringify(data), { expirationTtl: 86400 });
 
     // 反向映射：群组消息ID → 用户ID（用于通过消息反应查找用户）
-    const reverseKey = `group_msg_user:${groupMsgId}`;
+    const reverseKey = groupMessageUserKey(env, groupMsgId);
     await kvPut(env, reverseKey, String(userId), { expirationTtl: 86400 });
 }
 
@@ -306,9 +310,13 @@ async function deleteMessageAckAssoc(env, userId) {
 }
 
 async function getUserByGroupMessageId(env, groupMsgId) {
-    const reverseKey = `group_msg_user:${groupMsgId}`;
     try {
-        const userId = await kvGetText(env, reverseKey);
+        // Include the chat ID so messages from another group cannot collide with
+        // a forwarded message ID in this supergroup.  Keep the old key as a
+        // short-lived compatibility fallback for acknowledgements created by
+        // previous Worker versions.
+        const userId = await kvGetText(env, groupMessageUserKey(env, groupMsgId)) ||
+            await kvGetText(env, `group_msg_user:${groupMsgId}`);
         return userId ? Number(userId) : null;
     } catch (_) {
         return null;
