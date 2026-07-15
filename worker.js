@@ -6939,7 +6939,12 @@ async function forwardToTopic(msg, userId, key, env, ctx, origin = null) {
                     if (replyText) {
                         const replyRes = await tgCall(env, "sendMessage", {
                             chat_id: userId,
-                            text: replyText
+                            text: replyText,
+                            // Keep the acknowledgement in the reply thread of
+                            // the user's original message instead of sending a
+                            // standalone chat message.
+                            reply_to_message_id: msg.message_id,
+                            allow_sending_without_reply: true
                         });
 
                         if (replyRes.ok && replyRes.result) {
