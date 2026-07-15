@@ -1,3 +1,10 @@
 name = "nextgenforward"
 main = "worker.js"
 compatibility_date = "2026-01-15"
+
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "TOPIC_MAP"
+id = "3db4d7490ea148a1b64853fd9a278c9c"
