@@ -331,12 +331,15 @@ async function markMessageAckAsRead(env, userId) {
             const readEmoji = await getMessageAckReactionRead(env);
             if (!readEmoji) return;
 
-            await tgCall(env, "setMessageReaction", {
+            const reactionRes = await tgCall(env, "setMessageReaction", {
                 chat_id: userId,
                 message_id: assoc.userOriginalMsgId,
                 reaction: [{ type: "emoji", emoji: readEmoji }],
                 is_big: false
             });
+            if (!reactionRes?.ok) {
+                throw new Error(`setMessageReaction failed: ${reactionRes?.description || "unknown error"}`);
+            }
 
             Logger.info('message_ack_reaction_updated_on_read', {
                 userId,
@@ -348,11 +351,14 @@ async function markMessageAckAsRead(env, userId) {
             const readText = await getMessageAckReplyRead(env);
             if (!readText) return;
 
-            await tgCall(env, "editMessageText", {
+            const editRes = await tgCall(env, "editMessageText", {
                 chat_id: userId,
                 message_id: assoc.userReplyMsgId,
                 text: readText
             });
+            if (!editRes?.ok) {
+                throw new Error(`editMessageText failed: ${editRes?.description || "unknown error"}`);
+            }
 
             Logger.info('message_ack_reply_updated_on_read', {
                 userId,
@@ -365,6 +371,19 @@ async function markMessageAckAsRead(env, userId) {
     } catch (e) {
         Logger.warn('mark_message_ack_as_read_failed', e, { userId });
     }
+}
+
+// An anonymous group administrator is represented by Telegram as the group
+// itself (`sender_chat` / `actor_chat`), rather than by the administrator's ID.
+// That event can only originate from an administrator of this supergroup, so it
+// is safe to accept it as a read acknowledgement as well.
+function isAnonymousSupergroupAdmin(env, actorChat) {
+    return String(actorChat?.id || "") === String(env.SUPERGROUP_ID);
+}
+
+async function isAuthorizedReadMarker(env, userId, actorChat) {
+    if (userId && await isAdminUser(env, userId)) return true;
+    return isAnonymousSupergroupAdmin(env, actorChat);
 }
 
 
@@ -6204,7 +6223,7 @@ export default {
             // 消息确认反馈：管理员在话题内发消息 → 标记该话题对应用户的消息为已读
             if (msg.message_thread_id && msg.message_thread_id !== 1) {
                 const senderId = msg.from?.id;
-                if (senderId && (await isAdminUser(normalizedEnv, senderId))) {
+                if (await isAuthorizedReadMarker(normalizedEnv, senderId, msg.sender_chat)) {
                     const threadId = msg.message_thread_id;
                     const mappedUser = await kvGetText(normalizedEnv, `thread:${threadId}`);
                     const topicUserId = mappedUser ? Number(mappedUser) : await resolveUserIdByThreadId(normalizedEnv, threadId);
@@ -6264,9 +6283,10 @@ async function handleMessageReaction(reaction, env, ctx) {
         // 仅处理有新表情反应的情况（有人添加了反应）
         if (!Array.isArray(newReactions) || newReactions.length === 0) return;
 
-        // 仅 ADMIN_IDS 管理员添加表情才触发已读
-        const reactorId = reaction?.user?.id || reaction?.actor_chat?.id;
-        if (!reactorId || !(await isAdminUser(env, reactorId))) return;
+        // 普通管理员由 user 标识；匿名管理员由 actor_chat 标识为本群。
+        // 不要把 actor_chat 的群组 ID 当成用户 ID 去做 getChatMember 校验。
+        const reactorId = reaction?.user?.id;
+        if (!(await isAuthorizedReadMarker(env, reactorId, reaction?.actor_chat))) return;
 
         // 查找该群组消息对应的用户
         const targetUserId = await getUserByGroupMessageId(env, messageId);
